@@ -474,17 +474,27 @@ async def test_create_container_keeps_sysbox_runtime_for_s3fs_external_volume(
     )
 
 
+@pytest.mark.parametrize(
+    "subuid_stdout",
+    [
+        # A range wider than one slice means sysbox picks a different base per
+        # container, so the mount owner cannot be aligned.
+        "sysbox:231072:1048576",
+        # The host's /etc/subuid could not be read, or has no sysbox entry.
+        "",
+    ],
+)
 @pytest.mark.asyncio
-async def test_create_container_drops_sysbox_when_subuid_base_is_unusable(
+async def test_create_container_keeps_sysbox_and_skips_s3_volume_when_subuid_base_is_unusable(
     docker_service,
     executor_info,
     keypair,
     monkeypatch,
+    subuid_stdout,
 ):
-    # A range wider than one slice means sysbox picks a different base per
-    # container, so the mount owner cannot be aligned — the volume stays usable
-    # only under runc.
-    ssh_client = RecordingSSHClient(stdout="sysbox:231072:1048576")
+    # The pod must never fall back to runc for a volume: under runc the tenant's root is the
+    # host's uid 0. The volume is left out instead and the renter is told why.
+    ssh_client = RecordingSSHClient(stdout=subuid_stdout)
     _patch_create_harness(monkeypatch, docker_service, ssh_client)
     payload = _base_create_payload(
         is_sysbox=True,
@@ -504,11 +514,15 @@ async def test_create_container_drops_sysbox_when_subuid_base_is_unusable(
     )
 
     run_spec = docker_service.rental_docker_client_factory.client.run_specs[0]
-    assert run_spec.runtime is None
+    assert run_spec.runtime == "sysbox-runc"
+    assert payload.is_sysbox is True
+    assert not any(volume.source == "celium-volume-safe" for volume in run_spec.volumes)
+    assert not any("plugin install" in command for command in ssh_client.commands)
     streamed_messages = [
         call.args[0] for call in docker_service.stream_log.await_args_list
     ]
-    assert any("Sysbox disabled" in message for message in streamed_messages)
+    assert any("S3 volume not attached" in message for message in streamed_messages)
+    assert not any("Sysbox disabled" in message for message in streamed_messages)
 
 
 @pytest.mark.asyncio

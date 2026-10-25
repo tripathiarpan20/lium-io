@@ -7855,31 +7855,30 @@ class DockerService:
                         sysbox_subuid_base = await self.resolve_sysbox_subuid_base(
                             ssh_client=ssh_client, log_extra=default_extra
                         )
-                    success, msg = await self.create_s3fs_volume(
-                        ssh_client=ssh_client,
-                        log_extra=default_extra,
-                        volume_info=external_volume_info,
-                        log_tag=log_tag,
-                        sysbox_subuid_base=sysbox_subuid_base,
-                    )
+                    if payload.is_sysbox and sysbox_subuid_base is None:
+                        # Fail closed: the volume is left out and the pod keeps sysbox. Dropping to
+                        # runc to keep /mnt writable made the tenant's root the host's uid 0, so an
+                        # unreadable or multi-slice /etc/subuid silently removed the user namespace.
+                        success = False
+                        failure_log = "S3 volume not attached: cannot align its owner with the executor's sysbox uid range"
+                    else:
+                        success, msg = await self.create_s3fs_volume(
+                            ssh_client=ssh_client,
+                            log_extra=default_extra,
+                            volume_info=external_volume_info,
+                            log_tag=log_tag,
+                            sysbox_subuid_base=sysbox_subuid_base,
+                        )
+                        failure_log = "S3 volume setup failed"
                     if success:
                         # Add profiler for docker volume creation
                         profilers.append(ProfilerStep.since(ProfilerStepName.DOCKER_VOLUME_CREATION, prev_timestamp))
                         prev_timestamp = now_ms()
                         external_volume_name = external_volume_info.name
-                        if payload.is_sysbox and sysbox_subuid_base is None:
-                            # Decided only once the volume is really attached: runc
-                            # keeps /mnt writable, sysbox without the base does not.
-                            payload.is_sysbox = False
-                            await self.stream_log(
-                                "Sysbox disabled: cannot align S3 volume owner with the executor's sysbox uid range",
-                                "warning",
-                                log_tag,
-                            )
                     else:
                         warnings.append(ContainerWarningCode.ExternalVolumeFailed)
                         profilers.append(ProfilerStep.since(ProfilerStepName.DOCKER_VOLUME_CREATION_FAILED, prev_timestamp))
-                        await self.stream_log("S3 volume setup failed", "error", log_tag)
+                        await self.stream_log(failure_log, "error", log_tag)
 
                 # GPU options. --gpus injects userspace libs (libnvidia-ml.so, nvidia-smi);
                 # explicit --device entries persist the device cgroup across systemd
